@@ -97,7 +97,8 @@ static bool SelectBlockFromCandidates(
 
         //if the lowest block height (vSortedByTimestamp[0]) is >= switch height, use new modifier calc
         if (fFirstRun){
-            fModifierV2 = pindex->nHeight >= Params().ModifierUpgradeBlock();
+//            fModifierV2 = pindex->nHeight >= Params().ModifierUpgradeBlock();
+            fModifierV2 = true;
             fFirstRun = false;
         }
 
@@ -273,17 +274,19 @@ bool GetKernelStakeModifier(uint256 hashBlockFrom, uint64_t& nStakeModifier, int
 
     // loop to find the stake modifier later by a selection interval
     while (nStakeModifierTime < pindexFrom->GetBlockTime() + nStakeModifierSelectionInterval) {
-        if (!pindexNext) {
+        if (pindexNext) {
+            pindex = pindexNext;
+            pindexNext = chainActive[pindexNext->nHeight + 1];
+            if (pindex->GeneratedStakeModifier()) {
+                nStakeModifierHeight = pindex->nHeight;
+                nStakeModifierTime = pindex->GetBlockTime();
+            }
+        }else{
             // Should never happen
             return error("Null pindexNext\n");
         }
 
-        pindex = pindexNext;
-        pindexNext = chainActive[pindexNext->nHeight + 1];
-        if (pindex->GeneratedStakeModifier()) {
-            nStakeModifierHeight = pindex->nHeight;
-            nStakeModifierTime = pindex->GetBlockTime();
-        }
+
     }
     nStakeModifier = pindex->nStakeModifier;
     return true;
@@ -309,15 +312,15 @@ bool CheckStake(const CDataStream& ssUniqueID, CAmount nValueIn, const uint64_t 
 
     return stakeTargetHit(hashProofOfStake, nValueIn, bnTarget);
 }
-bool CheckStake(const uint256& bnStakeModifierV2, const CTransaction& txPrev, const COutPoint& prevout, unsigned int nTimeTx, uint256& hashProofOfStake, const uint256& bnTarget)
+bool CheckStake(const uint256& bnStakeModifierV2, const CTransaction& txPrev, const COutPoint& prevout, unsigned int nTimeTx, uint256& hashProofOfStake, const uint256& bnTarget, const CDataStream& ssUniqueID, CAmount nValueIn)
 {
     CDataStream ss(SER_GETHASH, 0);
     ss << bnStakeModifierV2;
-    ss << txPrev.nTime << prevout.hash << prevout.n << nTimeTx;
+    ss << txPrev.nTime << prevout.hash << prevout.n << ssUniqueID << nTimeTx;
     hashProofOfStake = Hash(ss.begin(), ss.end());
 //    LogPrintf("%s: modifier:%d nTimeBlockFrom:%d nTimeTx:%d hash:%s\n", __func__, bnStakeModifierV2, prevout.hash, prevout.n, hashProofOfStake.GetHex());
 
-    return stakeTargetHit(hashProofOfStake, txPrev.vout[prevout.n].nValue, bnTarget);
+    return stakeTargetHit(hashProofOfStake, nValueIn, bnTarget);
 }
 
 bool Stake(CStakeInput* stakeInput, unsigned int nBits, unsigned int nTimeBlockFrom, unsigned int& nTimeTx, uint256& hashProofOfStake)
@@ -423,11 +426,23 @@ bool CheckProofOfStake(const CBlock block, uint256& hashProofOfStake, std::uniqu
     unsigned int nTxTime = block.nTime;
     uint256 hashBlock;
     CTransaction txPrev;
-    if (GetTransaction(txin.prevout.hash, txPrev, hashBlock, true) && !CheckStake(pindex->bnStakeModifierV2, txPrev, txin.prevout, tx.nTime, hashProofOfStake, bnTargetPerCoinDay))
-    {
-        return error("CheckProofOfStake() : INFO: check kernel failed on coinstake %s, hashProof=%s \n",
-                     tx.GetHash().GetHex(), hashProofOfStake.GetHex());
+    CBaseChainParams::Network network = NetworkIdFromCommandLine();
+    fTestNet = network == CBaseChainParams::TESTNET;
+    if(fTestNet || pindex->nHeight > 257790){
+        if (!CheckStake(stake->GetUniqueness(), stake->GetValue(), nStakeModifier, bnTargetPerCoinDay, nBlockFromTime,
+                                                                                       nTxTime, hashProofOfStake))
+        {
+            return error("CheckProofOfStake() : INFO: check kernel failed on coinstake %s, hashProof=%s \n",
+                         tx.GetHash().GetHex(), hashProofOfStake.GetHex());
+        }
+    }else{
+        if (GetTransaction(txin.prevout.hash, txPrev, hashBlock, true) && !CheckStake(pindex->bnStakeModifierV2, txPrev, txin.prevout, tx.nTime, hashProofOfStake, bnTargetPerCoinDay, stake->GetUniqueness(), stake->GetValue()))
+        {
+            return error("CheckProofOfStake() : INFO: old bnStakeModifierV2 check kernel failed on coinstake %s, hashProof=%s \n",
+                         tx.GetHash().GetHex(), hashProofOfStake.GetHex());
+        }
     }
+
 
     return true;
 }
